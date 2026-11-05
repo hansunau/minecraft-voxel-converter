@@ -4,7 +4,7 @@
 
 ## 다운로드와 사용
 
-GitHub 저장소의 **Releases**에서 `VoxelConverter-Windows.zip`을 내려받아 압축을 풀고 `VoxelConverter.exe`를 실행하세요. Windows에 Blender가 설치되어 있어야 합니다. Blender 5.2.3에서 확인했으며, Blender와 Python을 EXE에 포함하지 않습니다. Blender를 찾지 못하면 프로그램에서 `blender.exe`를 선택하세요.
+GitHub 저장소의 **Releases**에서 `VoxelConverter-Windows-v06.zip`을 내려받아 압축을 풀고 `VoxelConverter.exe`를 실행하세요. Windows에 Blender가 설치되어 있어야 합니다. Blender 5.2.3에서 확인했으며, Blender와 Python을 EXE에 포함하지 않습니다. Blender를 찾지 못하면 프로그램에서 `blender.exe`를 선택하세요.
 
 1. BLEND, GLB, glTF, OBJ, STL, PLY, FBX 중 모델을 고르고 메시 오브젝트를 선택합니다.
 2. 블록 높이와 속 채우기/껍데기를 고릅니다. **블록 직접 선택**에서 사용할 재료를 고릅니다.
@@ -32,4 +32,5 @@ Windows의 Python 3에서 `python app.py`를 실행합니다. Tkinter가 필요�
 프로젝트 소스는 [GNU GPL v3.0 이상](LICENSE)입니다. Blender는 별도로 설치하는 독립 프로젝트이며 자체 라이선스를 따릅니다. Minecraft는 Mojang/Microsoft의 제품이며 이 프로젝트는 공식 제품이 아닙니다. 팔레트의 근사 색상은 Minecraft 26.3의 블록 텍스처를 분석한 수치이며 게임 텍스처나 게임 파일을 배포하지 않습니다.
 
 포맷 참고: [Sponge Schematic v3](https://github.com/SpongePowered/Schematic-Specification/blob/master/versions/schematic-3.md), [Litematica 26.3 구현](https://github.com/sakura-ryoko/litematica/tree/64e74592f631cfa5b084bedb0eda5dac8a3b3cb8).
+
 
