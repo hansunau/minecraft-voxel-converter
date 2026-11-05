@@ -1,4 +1,4 @@
-bl_info = {'name':'마인크래프트 복셀 변환기', 'author':'Codex', 'version':(0,5,0), 'blender':(4,2,0), 'location':'3D 뷰 > 사이드바 > 복셀', 'category':'Object'}
+bl_info = {'name':'마인크래프트 복셀 변환기', 'author':'Codex', 'version':(0,6,0), 'blender':(4,2,0), 'location':'3D 뷰 > 사이드바 > 복셀', 'category':'Object'}
 import bpy, math, time, json
 from mathutils import Vector
 from mathutils.bvhtree import BVHTree
@@ -50,6 +50,24 @@ def material_color(mesh, face, point, cache):
 def nearest(rgb, allowed):
     return min(allowed,key=lambda p:sum((p[1][i]-rgb[i])**2 for i in range(3)))[0]
 
+def oklab(rgb):
+    def linear(c):return c/12.92 if c<=.04045 else ((c+.055)/1.055)**2.4
+    r,g,b=(linear(max(0,min(1,c))) for c in rgb)
+    l=(.4122214708*r+.5363325363*g+.0514459929*b)**(1/3)
+    m=(.2119034982*r+.6806995451*g+.1073969566*b)**(1/3)
+    s=(.0883024619*r+.2817188376*g+.6299787005*b)**(1/3)
+    return (.2104542553*l+.793617785*m-.0040720468*s,1.9779984951*l-2.428592205*m+.4505937099*s,.0259040371*l+.7827717662*m-.808675766*s)
+
+def make_matcher(allowed):
+    palette=[(name,oklab(color)) for name,color in allowed]; cache={}
+    def match(rgb):
+        key=tuple(round(max(0,min(1,c))*63) for c in rgb)
+        if key not in cache:
+            lab=oklab(tuple(c/63 for c in key))
+            cache[key]=min(palette,key=lambda p:sum((p[1][i]-lab[i])**2 for i in range(3)))[0]
+        return cache[key]
+    return match
+
 class Settings(bpy.types.PropertyGroup):
     export_format: EnumProperty(name='저장 형식',items=[('SCHEM','WorldEdit (.schem)','Sponge v3'),('LITEMATIC','Litematica (.litematic)','Litematica v7')],default='SCHEM')
     height: IntProperty(name='높이 (블록)',default=32,min=1,max=512)
@@ -66,12 +84,13 @@ def generate(context, obj, s):
     selected={x.strip().removeprefix('minecraft:') for x in s.palette.split(',')}
     allowed=[p for p in PALETTE if s.palette_mode=='ALL' or (s.palette_mode=='SAFE' and p[0] in SAFE_NAMES) or (s.palette_mode=='CUSTOM' and p[0] in selected)]
     if not allowed: raise ValueError('허용 블록을 하나 이상 입력하세요')
+    match=make_matcher(allowed)
     deps=context.evaluated_depsgraph_get(); evaluated=obj.evaluated_get(deps); mesh=evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=deps)
     try:
         # Work in evaluated world coordinates, preserving the source object.
         mesh.transform(obj.matrix_world)
         import bmesh
-        bm=bmesh.new(); bm.from_mesh(mesh); bmesh.ops.triangulate(bm,faces=list(bm.faces)); bm.to_mesh(mesh); bm.free(); mesh.update()
+        bm=bmesh.new(); bm.from_mesh(mesh); check=bm.copy(); bmesh.ops.remove_doubles(check,verts=list(check.verts),dist=1e-7); is_open=any(not e.is_manifold for e in check.edges); check.free(); bmesh.ops.triangulate(bm,faces=list(bm.faces)); bm.to_mesh(mesh); bm.free(); mesh.update()
         if not mesh.polygons: raise ValueError('면이 있는 메시를 선택하세요')
         verts=[v.co for v in mesh.vertices]; low=Vector(tuple(min(v[i] for v in verts) for i in range(3))); high=Vector(tuple(max(v[i] for v in verts) for i in range(3)))
         span=high-low
@@ -81,20 +100,36 @@ def generate(context, obj, s):
         if total>s.limit: raise ValueError(f'격자 {total:,}개가 제한 {s.limit:,}개를 초과합니다. 높이를 줄이세요')
         tree=BVHTree.FromPolygons(verts,[list(p.vertices) for p in mesh.polygons],all_triangles=True)
         cells={}; image_cache={}; eps=size*1e-5
-        # Vertical parity ray casting; intersections delimit solid intervals.
-        for x in range(nx):
-            for y in range(ny):
-                origin=Vector((low.x+(x+.5)*size,low.y+(y+.5)*size,low.z-size)); hits=[]
-                for _ in range(len(mesh.polygons)+1):
-                    hit,normal,face,dist=tree.ray_cast(origin,Vector((0,0,1)))
-                    if hit is None: break
-                    hits.append(hit.z); origin=hit+Vector((0,0,eps))
-                for z in range(nz):
-                    center=Vector((low.x+(x+.5)*size,low.y+(y+.5)*size,low.z+(z+.5)*size))
-                    if sum(h<center.z for h in hits)%2:
-                        near,normal,face,dist=tree.find_nearest(center)
-                        if face is not None: cells[(x,z,y)]='minecraft:'+nearest(material_color(mesh,face,near,image_cache),allowed)
-            yield ('복셀화', (x+1)/nx*.8)
+        if is_open:
+            # Open surfaces do not have a reliable inside; retain sampled surface
+            # instead of creating long spurious parity-filled streaks.
+            from .surface import surface_cells
+            g=surface_cells(tree,low,size,(nx,ny,nz),(0,0,0),(nx,ny,nz))
+            while True:
+                try:
+                    fraction=next(g); yield ('열린 메시 · 표면 보정',.4*fraction)
+                except StopIteration as result:
+                    points=result.value; break
+            for index,(x,y,z) in enumerate(points):
+                center=low+Vector(((x+.5)*size,(y+.5)*size,(z+.5)*size))
+                near,normal,face,dist=tree.find_nearest(center)
+                if face is not None: cells[(x,z,y)]='minecraft:'+match(material_color(mesh,face,near,image_cache))
+                if index%512==0: yield ('표면 색상 선택',.4+.4*index/max(1,len(points)))
+        else:
+            # Vertical parity ray casting; intersections delimit solid intervals.
+            for x in range(nx):
+                for y in range(ny):
+                    origin=Vector((low.x+(x+.5)*size,low.y+(y+.5)*size,low.z-size)); hits=[]
+                    for _ in range(len(mesh.polygons)+1):
+                        hit,normal,face,dist=tree.ray_cast(origin,Vector((0,0,1)))
+                        if hit is None: break
+                        hits.append(hit.z); origin=hit+Vector((0,0,eps))
+                    for z in range(nz):
+                        center=Vector((low.x+(x+.5)*size,low.y+(y+.5)*size,low.z+(z+.5)*size))
+                        if sum(h<center.z for h in hits)%2:
+                            near,normal,face,dist=tree.find_nearest(center)
+                            if face is not None: cells[(x,z,y)]='minecraft:'+match(material_color(mesh,face,near,image_cache))
+                yield ('복셀화', (x+1)/nx*.8)
         if not cells: raise ValueError('결과가 비어 있습니다. 닫힌 메시인지 확인하거나 해상도를 높이세요')
         # Replace isolated color matches only where at least four neighbors agree
         # and the candidate colors are already close. Keep sharp color accents.
@@ -129,6 +164,7 @@ def generate(context, obj, s):
             mat=bpy.data.materials.new(name); rgb=dict(PALETTE)[name.split(':')[1]]; mat.diffuse_color=(*rgb,1); outmesh.materials.append(mat)
         for p,i in zip(outmesh.polygons,mids): p.material_index=i
         collection=bpy.data.collections.new('복셀 결과'); context.scene.collection.children.link(collection); collection.objects.link(result)
+        result['voxel_surface_only']=is_open
         result['voxel_dims']=json.dumps([nx,nz,ny]); result['voxel_cells']=json.dumps([[*p,b] for p,b in cells.items()],separators=(',',':')); result['voxel_data_version']=s.data_version
         context.view_layer.objects.active=result; result.select_set(True); obj.select_set(False)
         yield ('완료',1)
@@ -148,7 +184,7 @@ class Convert(bpy.types.Operator):
             try:
                 label,progress=next(self._gen); context.scene.voxel_settings.status=f'{label} {progress:.0%} (Esc 취소)'; context.window_manager.progress_update(progress*100); context.area.tag_redraw()
             except StopIteration:
-                self.finish(context); context.scene.voxel_settings.status='완료'; return {'FINISHED'}
+                self.finish(context); context.scene.voxel_settings.status=('완료 · 열린 메시: 표면만' if context.active_object.get('voxel_surface_only',False) else '완료'); return {'FINISHED'}
             except Exception as e:
                 self.finish(context); context.scene.voxel_settings.status='오류: '+str(e); self.report({'ERROR'},str(e)); return {'CANCELLED'}
         return {'PASS_THROUGH'}

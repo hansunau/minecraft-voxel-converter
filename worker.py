@@ -17,6 +17,20 @@ try:
     if cfg['action']=='list':
         meshes=[o.name for o in bpy.context.scene.objects if o.type=='MESH']
         send(kind='objects',names=meshes)
+    elif cfg['action']=='preview_source':
+        import random
+        obj=bpy.context.scene.objects.get(cfg['object'])
+        if not obj or obj.type!='MESH': raise ValueError('선택한 메시를 찾을 수 없습니다.')
+        evaluated=obj.evaluated_get(bpy.context.evaluated_depsgraph_get()); mesh=evaluated.to_mesh()
+        try:
+            vertices=[obj.matrix_world @ v.co for v in mesh.vertices]
+            if not vertices:raise ValueError('미리 볼 정점이 없습니다.')
+            lo=[min(p[i] for p in vertices) for i in range(3)]; hi=[max(p[i] for p in vertices) for i in range(3)]
+            random.Random(11).shuffle(vertices); sample=vertices[:6000]
+            dims=[max(hi[0]-lo[0],1e-9),max(hi[2]-lo[2],1e-9),max(hi[1]-lo[1],1e-9)]
+            points=[[p.x-lo[0],p.z-lo[2],p.y-lo[1],'minecraft:light_gray_concrete'] for p in sample]
+            send(kind='source_preview',data={'dims':dims,'cells':points,'total':len(vertices),'source':True})
+        finally:evaluated.to_mesh_clear()
     else:
         vb.register(); obj=bpy.context.scene.objects.get(cfg['object'])
         if not obj or obj.type!='MESH': raise ValueError('선택한 메시를 찾을 수 없습니다. 파일을 다시 불러오세요.')
@@ -27,7 +41,11 @@ try:
             for label,progress in export_chunks(bpy.context,obj,s,cfg['output'],cfg['format']):
                 send(kind='progress',label=label,value=progress)
                 if label.startswith('완료: '): out=label[4:]
-            send(kind='chunks_done',path=out)
+            preview_path=os.path.join(out,'preview.json')
+            if os.path.isfile(preview_path):
+                with open(preview_path,encoding='utf8') as f: send(kind='preview',data=json.load(f))
+            with open(os.path.join(out,'manifest.json'),encoding='utf8') as f: surface_only=json.load(f).get('algorithm')=='surface_three_axis'
+            send(kind='chunks_done',path=out,surface_only=surface_only)
             sys.exit(0)
         s.height=cfg['height']
         for label,progress in vb.generate(bpy.context,obj,s): send(kind='progress',label=label,value=progress)
@@ -39,6 +57,9 @@ try:
             os.replace(tmp,dest)
         finally:
             if os.path.isfile(tmp): os.remove(tmp)
-        send(kind='done',dims=dims,blocks=len(cells),path=dest)
+        import random
+        sample=list(cells.items()); random.Random(11).shuffle(sample); sample=sample[:6000]
+        send(kind='preview',data={'dims':dims,'cells':[[*p,b] for p,b in sample],'total':len(cells),'surface_only':bool(result.get('voxel_surface_only',False))})
+        send(kind='done',dims=dims,blocks=len(cells),path=dest,surface_only=bool(result.get('voxel_surface_only',False)))
 except Exception as e:
     send(kind='error',message=str(e)); traceback.print_exc(); sys.exit(1)

@@ -1,4 +1,4 @@
-import os,sys,json,tempfile,threading,subprocess,queue,shutil
+import os,sys,json,tempfile,threading,subprocess,queue,shutil,math
 import tkinter as tk
 from tkinter import ttk,filedialog,messagebox
 
@@ -102,16 +102,38 @@ def find_blender():
     except OSError: pass
     return next((p for p in choices if p and os.path.isfile(p)), '')
 
+class PreviewWindow:
+    def __init__(self,root,data):
+        self.window=tk.Toplevel(root); self.window.title('복셀 3D 미리보기'); self.window.geometry('720x720'); self.window.configure(bg='#f2f5f9')
+        self.data=data; self.yaw=-.6; self.pitch=.3; self.scale=1.; self.last=None
+        self.colors={name:'#%02x%02x%02x'%tuple(max(0,min(255,round(v*255))) for v in rgb) for name,rgb,safe in BLOCKS}
+        ttk.Label(self.window,text=('원본 정점 표본 · 색상 미반영  ·  ' if data.get('source') else '결과 블록 표본  ·  ')+f"드래그: 회전  ·  휠: 확대/축소  ·  {len(data['cells']):,}/{data['total']:,}개 표본",style='Subtitle.TLabel').pack(pady=8)
+        self.canvas=tk.Canvas(self.window,bg='#1b2431',highlightthickness=0);self.canvas.pack(fill='both',expand=True,padx=12,pady=(0,12))
+        self.canvas.bind('<Configure>',lambda e:self.draw()); self.canvas.bind('<ButtonPress-1>',self.down);self.canvas.bind('<B1-Motion>',self.drag);self.canvas.bind('<MouseWheel>',self.zoom)
+    def down(self,e):self.last=(e.x,e.y)
+    def drag(self,e):
+        if self.last:
+            self.yaw+=(e.x-self.last[0])*.012;self.pitch=max(-1.45,min(1.45,self.pitch+(e.y-self.last[1])*.012));self.last=(e.x,e.y);self.draw()
+    def zoom(self,e):self.scale=max(.35,min(6,self.scale*(1.12 if e.delta>0 else 1/1.12)));self.draw()
+    def draw(self):
+        c=self.canvas;c.delete('all'); width=max(1,c.winfo_width());height=max(1,c.winfo_height());dims=self.data['dims'];maxdim=max(dims);unit=min(width,height)*.78/maxdim*self.scale
+        cy,sy=math.cos(self.yaw),math.sin(self.yaw);cp,sp=math.cos(self.pitch),math.sin(self.pitch); points=[]
+        for x,y,z,block in self.data['cells']:
+            x=x-dims[0]/2;y=y-dims[1]/2;z=z-dims[2]/2;rx=x*cy-z*sy;rz=x*sy+z*cy;ry=y*cp-rz*sp;depth=y*sp+rz*cp
+            points.append((depth,width/2+rx*unit,height/2-ry*unit,self.colors.get(block.removeprefix('minecraft:'),'#bbbbbb')))
+        radius=max(1.0,min(6,unit*.65))
+        for depth,x,y,color in sorted(points):c.create_rectangle(x-radius,y-radius,x+radius,y+radius,fill=color,outline='')
+
 class App:
     def __init__(self,root):
         self.root=root; root.title('마인크래프트 복셀 변환기'); root.geometry('760x750'); root.minsize(690,690); configure_style(root)
-        self.blender=tk.StringVar(value=find_blender()); self.model=tk.StringVar(); self.obj=tk.StringVar(); self.height=tk.IntVar(value=32); self.mode=tk.StringVar(value='SHELL'); self.thickness=tk.IntVar(value=1); self.format=tk.StringVar(value='litematic'); self.chunked=tk.BooleanVar(value=False); self.status=tk.StringVar(value='1. Blender와 모델 파일을 선택하세요.'); self.progress=tk.DoubleVar(); self.proc=None; self.q=queue.Queue(); self.selected_blocks=set(SAFE_NAMES); self.palette_summary=tk.StringVar(value=f'{len(SAFE_NAMES)}종 선택됨')
+        self.blender=tk.StringVar(value=find_blender()); self.model=tk.StringVar(); self.obj=tk.StringVar(); self.height=tk.IntVar(value=32); self.mode=tk.StringVar(value='SHELL'); self.thickness=tk.IntVar(value=1); self.format=tk.StringVar(value='litematic'); self.chunked=tk.BooleanVar(value=False); self.status=tk.StringVar(value='1. Blender와 모델 파일을 선택하세요.'); self.progress=tk.DoubleVar(); self.proc=None; self.q=queue.Queue(); self.preview_data=None; self.selected_blocks=set(SAFE_NAMES); self.palette_summary=tk.StringVar(value=f'{len(SAFE_NAMES)}종 선택됨')
         main=ttk.Frame(root,padding=(28,24)); main.pack(fill='both',expand=True)
         ttk.Label(main,text='모델을 블록으로',style='Title.TLabel').pack(anchor='w')
         ttk.Label(main,text='Minecraft Java 26.3  ·  파일은 내 컴퓨터에서 안전하게 변환됩니다',style='Subtitle.TLabel').pack(anchor='w',pady=(3,20))
         self.file_row(main,'Blender 실행 파일',self.blender,self.choose_blender)
         self.file_row(main,'변환할 모델 파일',self.model,self.choose_model)
-        line=ttk.Frame(main); line.pack(fill='x',pady=5); ttk.Label(line,text='메시 오브젝트',width=18).pack(side='left'); self.objects=ttk.Combobox(line,textvariable=self.obj,state='readonly'); self.objects.pack(side='left',fill='x',expand=True); ttk.Button(line,text='목록 불러오기',command=self.scan).pack(side='left',padx=(8,0))
+        line=ttk.Frame(main); line.pack(fill='x',pady=5); ttk.Label(line,text='메시 오브젝트',width=18).pack(side='left'); self.objects=ttk.Combobox(line,textvariable=self.obj,state='readonly'); self.objects.pack(side='left',fill='x',expand=True); ttk.Button(line,text='목록 불러오기',command=self.scan).pack(side='left',padx=(8,0)); ttk.Button(line,text='원본 보기',command=self.preview_source).pack(side='left',padx=(5,0))
         box=ttk.LabelFrame(main,text='  변환 설정  ',padding=16,style='Section.TLabelframe'); box.pack(fill='x',pady=8)
         row=ttk.Frame(box,style='Card.TFrame'); row.pack(fill='x'); ttk.Label(row,text='높이 (블록)',style='Card.TLabel').pack(side='left'); ttk.Spinbox(row,from_=1,to=2048,textvariable=self.height,width=7).pack(side='left',padx=8); ttk.Radiobutton(row,text='껍데기',style='Card.TRadiobutton',variable=self.mode,value='SHELL').pack(side='left'); ttk.Radiobutton(row,text='속 채우기',style='Card.TRadiobutton',variable=self.mode,value='SOLID').pack(side='left'); ttk.Label(row,text='벽 두께',style='Card.TLabel').pack(side='left',padx=(15,2)); ttk.Spinbox(row,from_=1,to=16,textvariable=self.thickness,width=4).pack(side='left')
         row=ttk.Frame(box,style='Card.TFrame'); row.pack(fill='x',pady=(14,0))
@@ -121,8 +143,8 @@ class App:
         ttk.Checkbutton(main,text='대용량 구역별 저장 (속 채우기, 높이 최대 2048)',variable=self.chunked).pack(anchor='w',pady=(8,0))
         row=ttk.Frame(main); row.pack(fill='x',pady=8); ttk.Label(row,text='저장 형식',width=18).pack(side='left'); ttk.Radiobutton(row,text='Litematica',variable=self.format,value='litematic').pack(side='left'); ttk.Radiobutton(row,text='WorldEdit',variable=self.format,value='schem').pack(side='left',padx=14)
         ttk.Progressbar(main,variable=self.progress,maximum=100).pack(fill='x',pady=(10,2)); ttk.Label(main,textvariable=self.status,wraplength=650).pack(anchor='w')
-        row=ttk.Frame(main); row.pack(fill='x',pady=12); self.start=ttk.Button(row,text='변환하고 저장하기  →',style='Accent.TButton',command=self.convert); self.start.pack(side='left'); ttk.Button(row,text='작업 취소',command=self.cancel).pack(side='left',padx=8)
-        ttk.Label(main,text='닫힌 메시를 사용하세요. 원본 파일은 수정하지 않습니다.\n대용량: 구역당 최대 131,072격자 · 약 400MB + 텍스처',foreground='#555').pack(anchor='w')
+        row=ttk.Frame(main); row.pack(fill='x',pady=12); self.start=ttk.Button(row,text='변환하고 저장하기  →',style='Accent.TButton',command=self.convert); self.start.pack(side='left'); ttk.Button(row,text='작업 취소',command=self.cancel).pack(side='left',padx=8); self.preview_button=ttk.Button(row,text='3D 미리보기',command=self.show_preview,state='disabled'); self.preview_button.pack(side='left')
+        ttk.Label(main,text='열린 메시는 표면 보정됩니다. 원본 파일은 수정하지 않습니다.\n대용량: 구역당 최대 131,072격자 · 약 400MB + 텍스처',foreground='#555').pack(anchor='w')
         root.protocol('WM_DELETE_WINDOW',self.close); root.after(100,self.poll)
     def file_row(self,parent,label,var,cmd):
         row=ttk.Frame(parent); row.pack(fill='x',pady=5); ttk.Label(row,text=label,width=18).pack(side='left'); ttk.Entry(row,textvariable=var).pack(side='left',fill='x',expand=True); ttk.Button(row,text='찾기',command=cmd).pack(side='left',padx=(8,0))
@@ -139,6 +161,10 @@ class App:
         return True
     def scan(self):
         if self.validate(): self.launch({'action':'list'}); self.status.set('메시 목록 불러오는 중...')
+    def preview_source(self):
+        if not self.validate():return
+        if not self.obj.get(): messagebox.showerror('메시 필요','먼저 메시를 선택하세요.');return
+        self.launch({'action':'preview_source','object':self.obj.get()}); self.status.set('원본 미리보기 준비 중...')
     def convert(self):
         if not self.validate():return
         try:
@@ -176,6 +202,8 @@ class App:
                 try:os.unlink(path)
                 except OSError:pass
         threading.Thread(target=run,daemon=True).start()
+    def show_preview(self):
+        if self.preview_data: PreviewWindow(self.root,self.preview_data)
     def poll(self):
         try:
             while True:
@@ -183,8 +211,10 @@ class App:
                 if kind=='objects':
                     names=e['names']; self.objects['values']=names; self.obj.set(names[0] if names else ''); self.status.set(f'메시 {len(names)}개를 찾았습니다.' if names else '메시가 없습니다.')
                 elif kind=='progress':self.progress.set(e['value']*100); self.status.set(e['label']+f" {e['value']:.0%}")
-                elif kind=='done':self.status.set(f"완료: {e['blocks']:,}개 블록 · 크기 {e['dims']}"); messagebox.showinfo('변환 완료',f"저장했습니다:\n{e['path']}\n\n블록 {e['blocks']:,}개")
-                elif kind=='chunks_done':self.status.set('구역별 저장 완료: '+e['path']); messagebox.showinfo('변환 완료','구역별 결과를 저장했습니다:\n'+e['path'])
+                elif kind=='source_preview':self.status.set('원본 정점 표본 · 색상 미반영');PreviewWindow(self.root,e['data'])
+                elif kind=='preview':self.preview_data=e['data'];self.preview_button.config(state='normal')
+                elif kind=='done':self.status.set(f"완료: {e['blocks']:,}개 블록 · 크기 {e['dims']}"); messagebox.showinfo('변환 완료',f"저장했습니다:\n{e['path']}\n\n블록 {e['blocks']:,}개"+('\n열린 메시: 표면만 변환했습니다.' if e.get('surface_only') else ''))
+                elif kind=='chunks_done':self.status.set('구역별 저장 완료: '+e['path']); messagebox.showinfo('변환 완료','구역별 결과를 저장했습니다:\n'+e['path']+('\n열린 메시: 표면만 변환했습니다.' if e.get('surface_only') else ''))
                 elif kind=='error':self.status.set('오류: '+e['message']); messagebox.showerror('변환 오류',e['message'])
                 elif kind=='exit':
                     self.proc=None; self.start.config(state='normal')
